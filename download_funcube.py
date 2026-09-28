@@ -1,35 +1,64 @@
+"""
+Download recent SatNOGS observations (audio + metadata) for one satellite.
+
+For every pass we keep:
+  * the audio recording (.ogg)                  -> data/<norad>/obs_<id>.ogg
+  * the FULL observation record from SatNOGS    -> data/<norad>/obs_<id>.json
+    (ground-station location, the TLE the station used, frequencies, etc.)
+  * one summary row per pass in a manifest      -> data/<norad>/manifest.json
+
+Usage:
+    python download_funcube.py                    # FUNcube-1, last 24 h, 10 passes
+    python download_funcube.py --norad 43017      # a different satellite
+    python download_funcube.py --hours 48 --count 20
+    python download_funcube.py --skip-validation  # download only
+
+After downloading, every pass is automatically checked for a real signal by
+validate_signals.py (see that file / docs/signal_validation.md).
+"""
+import argparse
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 
-# --- Parameters (the only "magic" values; change these freely) ----------------
+# --- Defaults (all can be overridden on the command line) ---------------------
 NORAD_ID = 39444                # FUNcube-1
-WANT_STATUS = "good"            # only human-vetted "good" recordings have usable audio
-TARGET_COUNT = 10               # how many distinct passes we want to download
-WINDOW_DAYS = 3                 # they must all fall within this many days of each other
+WANT_STATUS = "good"            # SatNOGS vetting status; use "any" to skip this filter
+TARGET_COUNT = 10               # how many distinct passes we want (a minimum, ideally)
+WINDOW_HOURS = 24               # only passes that started in the last this-many hours
 MIN_SEPARATION_MIN = 30         # min minutes between chosen passes, so we don't grab the
                                 # same ~15-min pass twice (FUNcube-1's orbit is ~97 min;
                                 # raise toward ~90 to force strictly different revolutions)
 
 API_BASE = "https://network.satnogs.org/api"
-DATA_DIR = Path(__file__).parent / "data"                    # git-ignored audio lands here
-MANIFEST_PATH = Path(__file__).parent / "downloads_manifest.json"  # record of what we pulled
+DATA_ROOT = Path(__file__).parent / "data"   # git-ignored; one sub-folder per NORAD ID
 
 # The observation fields that hold the audio-file URL, in order of preference.
 # 'payload' = the raw .ogg; 'archive_url' = the archived copy for older passes.
 AUDIO_FIELDS = ("payload", "archive_url")
 
-USER_AGENT = "funcube-orbit-project/0.3 (student ground-station project)"
+# Metadata we copy into the manifest summary. The complete record is always saved
+# to obs_<id>.json as well, so nothing is lost if a field here is renamed/missing.
+SUMMARY_FIELDS = (
+    "start", "end", "status", "vetted_status", "waterfall_status",
+    "ground_station", "station_name", "station_lat", "station_lng", "station_alt",
+    "tle0", "tle1", "tle2",
+    "transmitter_uuid", "transmitter_mode", "transmitter_baud",
+    "transmitter_downlink_low", "transmitter_downlink_drift",
+    "center_frequency", "observation_frequency",
+    "rise_azimuth", "set_azimuth", "max_altitude",
+    "client_version",
+)
+
+USER_AGENT = "funcube-orbit-project/0.4 (student ground-station project)"
 REQUEST_TIMEOUT = 60            # seconds per HTTP request
 REQUEST_PAUSE = 2               # seconds between requests (be polite: ~60/hour limit)
-MAX_PAGES = 20                  # safety cap on API pages. FUNcube-1 is observed almost
-                                # continuously (~150 good obs per 2.5 h), so we need to page
-                                # back a few hours to collect 10 passes spaced 30 min apart.
-                                # The loop stops early as soon as it has TARGET_COUNT.
+MAX_PAGES = 20                  # safety cap on API pages; the loop usually stops sooner
+
 
 def parse_next_link(link_header):
     """Pull the rel="next" URL out of an HTTP Link header, or return None."""
@@ -97,21 +126,29 @@ def download(url, destination):
     print(f"    done ({destination.stat().st_size} bytes)")
 
 
-def select_passes():
-    """
-    Page through good FUNcube-1 observations (newest first) and pick up to
-    TARGET_COUNT that (a) have audio, (b) fall within WINDOW_DAYS of the newest
-    such observation, and (c) start at least MIN_SEPARATION_MIN apart from every
-    pass already chosen -- so each one is a distinct pass, not a repeat.
-    Returns a list of dicts: {id, start, audio_field, audio_url}.
-    """
-    query = urlencode({"satellite__norad_cat_id": NORAD_ID, "status": WANT_STATUS})
-    url = f"{API_BASE}/observations/?{query}"
+def missing_metadata(obs):
+    """List the metadata we need for orbit work (location + TLE) that this record lacks."""
+    needed = ("station_lat", "station_lng", "station_alt", "tle1", "tle2")
+    return [name for name in needed if obs.get(name) in (None, "")]
 
+
+def select_passes(norad_id, status, count, window_hours, separation_min):
+    """
+    Page through observations of this satellite (newest first) and pick up to
+    `count` that (a) have audio, (b) started within the last `window_hours`, and
+    (c) start at least `separation_min` minutes from every pass already chosen,
+    so each one is a distinct pass, not a repeat.
+    Returns the full SatNOGS observation records (dicts) that were chosen.
+    """
+    params = {"satellite__norad_cat_id": norad_id}
+    if status != "any":
+        params["status"] = status
+    url = f"{API_BASE}/observations/?{urlencode(params)}"
+
+    now = datetime.now(timezone.utc)
+    oldest_allowed = now - timedelta(hours=window_hours)
+    separation = timedelta(minutes=separation_min)
     chosen = []
-    chosen_starts = []           # start times of chosen passes, for the separation test
-    anchor = None                # start time of the newest good-with-audio observation
-    separation = timedelta(minutes=MIN_SEPARATION_MIN)
     pages = 0
     stop = False
 
@@ -120,31 +157,21 @@ def select_passes():
         pages += 1
 
         for obs in observations:
-            if obs.get("status") != WANT_STATUS:   # re-check ourselves; a stray slipped through before
-                continue
-            audio_field, audio_url = find_audio_url(obs)
-            if not audio_url:
-                continue
-
+            if status != "any" and obs.get("status") != status:
+                continue                             # re-check; a stray slipped through before
             start = parse_time(obs["start"])
-            if anchor is None:
-                anchor = start                      # window ends at the newest good pass
-            if anchor - start > timedelta(days=WINDOW_DAYS):
+            if start > now:
+                continue                             # scheduled future pass, no audio yet
+            if start < oldest_allowed:
                 stop = True                          # gone past the window; stop paging
                 break
-
-            # Only keep it if it's far enough from every pass already chosen.
-            if any(abs(start - s) < separation for s in chosen_starts):
+            if not find_audio_url(obs)[1]:
+                continue
+            if any(abs(start - parse_time(c["start"])) < separation for c in chosen):
                 continue
 
-            chosen.append({
-                "id": obs["id"],
-                "start": obs["start"],
-                "audio_field": audio_field,
-                "audio_url": audio_url,
-            })
-            chosen_starts.append(start)
-            if len(chosen) >= TARGET_COUNT:
+            chosen.append(obs)
+            if len(chosen) >= count:
                 stop = True
                 break
 
@@ -157,40 +184,76 @@ def select_passes():
 
 
 def main():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--norad", type=int, default=NORAD_ID, help="satellite NORAD ID")
+    parser.add_argument("--count", type=int, default=TARGET_COUNT, help="passes to download")
+    parser.add_argument("--hours", type=float, default=WINDOW_HOURS, help="look-back window")
+    parser.add_argument("--status", default=WANT_STATUS,
+                        help='SatNOGS status filter: good, bad, failed, unknown or "any"')
+    parser.add_argument("--separation", type=float, default=MIN_SEPARATION_MIN,
+                        help="minimum minutes between chosen passes")
+    parser.add_argument("--skip-validation", action="store_true",
+                        help="don't run the signal check after downloading")
+    args = parser.parse_args()
 
-    chosen = select_passes()
+    out_dir = DATA_ROOT / str(args.norad)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
+    chosen = select_passes(args.norad, args.status, args.count, args.hours, args.separation)
     if not chosen:
-        print("\nFound no good FUNcube-1 observations with audio. "
-              "Check NORAD_ID / the API, then try again.")
+        print(f"\nFound no observations of NORAD {args.norad} with audio in the last "
+              f"{args.hours:g} h. Try a larger --hours or --status any.")
         return
 
-    # Report the window we actually got, and flag if it is short of the target.
-    times = sorted(parse_time(c["start"]) for c in chosen)
-    span = times[-1] - times[0]
-    print(f"\nSelected {len(chosen)} distinct passes spanning {span} "
-          f"({times[0].date()} to {times[-1].date()}).")
-    if len(chosen) < TARGET_COUNT:
-        print(f"  NOTE: wanted {TARGET_COUNT} but only found {len(chosen)} distinct passes "
-              f"within {WINDOW_DAYS} days at >= {MIN_SEPARATION_MIN} min apart. "
-              f"Widen WINDOW_DAYS, lower MIN_SEPARATION_MIN, or accept fewer.")
+    times = sorted(parse_time(o["start"]) for o in chosen)
+    print(f"\nSelected {len(chosen)} distinct passes from {times[0]} to {times[-1]}.")
+    if len(chosen) < args.count:
+        print(f"  NOTE: wanted {args.count} but only found {len(chosen)} within "
+              f"{args.hours:g} h at >= {args.separation:g} min apart. "
+              f"Widen --hours, lower --separation, or accept fewer.")
 
-    # Download each, skipping files we already have (safe to re-run).
     print()
     manifest = []
-    for c in chosen:
-        destination = DATA_DIR / f"obs_{c['id']}.ogg"
-        if destination.exists():
-            print(f"skip (already have) {destination.name}")
-        else:
-            download(c["audio_url"], destination)
-            time.sleep(REQUEST_PAUSE)
-        manifest.append({**c, "file": destination.name})
+    for obs in chosen:
+        obs_id = obs["id"]
+        audio_field, audio_url = find_audio_url(obs)
+        audio_path = out_dir / f"obs_{obs_id}.ogg"
+        meta_path = out_dir / f"obs_{obs_id}.json"
 
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2))
-    have = sum(1 for c in manifest if (DATA_DIR / c["file"]).exists())
-    print(f"\nDone. {have} audio files in {DATA_DIR}/  |  manifest: {MANIFEST_PATH.name}")
+        # Always (re)write the metadata: it is small and may have been updated.
+        meta_path.write_text(json.dumps(obs, indent=2))
+        if audio_path.exists():
+            print(f"skip (already have) {audio_path.name}")
+        else:
+            download(audio_url, audio_path)
+            time.sleep(REQUEST_PAUSE)
+
+        gaps = missing_metadata(obs)
+        if gaps:
+            print(f"  WARNING obs {obs_id}: metadata missing {', '.join(gaps)}")
+
+        manifest.append({
+            "id": obs_id,
+            "norad_id": args.norad,
+            "audio_file": audio_path.name,
+            "metadata_file": meta_path.name,
+            "audio_field": audio_field,
+            "audio_url": audio_url,
+            **{name: obs.get(name) for name in SUMMARY_FIELDS},
+        })
+
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    stations = {m["station_name"] or m["ground_station"] for m in manifest}
+    print(f"\nDone. {len(manifest)} passes from {len(stations)} ground station(s) "
+          f"in {out_dir}/  |  manifest: {manifest_path}")
+    if args.skip_validation:
+        print(f"Validate later with: python validate_signals.py {out_dir}")
+    else:
+        from validate_signals import validate_folder   # needs numpy/scipy/soundfile
+        print("\nChecking each pass for a real signal...\n")
+        validate_folder(out_dir)
 
 
 if __name__ == "__main__":
