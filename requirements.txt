@@ -3,3 +3,7 @@ scipy
 soundfile
 matplotlib
 pytest
+# Optional: waterfall CNN screen (waterfall_cnn.py). Without these the audio check runs alone.
+torch
+torchvision
+pillow

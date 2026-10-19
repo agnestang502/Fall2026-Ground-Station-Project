@@ -6,10 +6,11 @@ by comparing the observed signal frequency with what each station expected from 
 ## Pipeline so far
 
 1. **`download_funcube.py`**: downloads recent passes for a satellite (default
-   FUNcube-1, NORAD 39444, last 24 h) with the audio **and** metadata (ground-station
-   location and the TLE the station used).
-2. **`validate_signals.py`**: runs automatically after downloading. It checks each
-   recording for a real satellite signal and rejects anything doubtful.
+   FUNcube-1, NORAD 39444, last 24 h) with the audio, the SatNOGS waterfall image **and** metadata
+   (ground-station location and the TLE the station used).
+2. **`validate_signals.py`**: runs automatically after downloading. It first screens the
+   waterfall image with the CNN classifier in **`waterfall_cnn.py`** (by Tata Li), then
+   checks the audio for FUNcube-1's signal, and rejects anything doubtful.
 
 See [docs/signal_validation.md](docs/signal_validation.md) for a plain-English
 explanation and the results on our first 10 passes.

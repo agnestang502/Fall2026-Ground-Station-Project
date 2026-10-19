@@ -97,11 +97,8 @@ The script writes:
 * `validation_plots/obs_<id>.png`: the spectrogram with the detected track in red,
   so a human can double-check any verdict in a couple of seconds.
 
-**Hook for the earlier machine-learning classifier.** The meeting mentioned
-using the ML signal test that was already built. That model isn't in this repository,
-so `external_classifier_vote()` in `validate_signals.py` is the place to plug it in.
-It's wired so the model can only make the check **stricter**: if it says "no
-signal", the pass becomes `UNCERTAIN`.
+**Machine-learning screen.** The partner's CNN waterfall classifier now runs first;
+see [Update: CNN screen + wide-signal detector](#update-cnn-screen--wide-signal-detector-oct-18).
 
 ### 3. Tests (`tests/`)
 
@@ -153,10 +150,8 @@ interference, so it's rejected.*
 * **SatNOGS's "good" rating isn't enough on its own.** A "good" rating says the
   observation worked by SatNOGS's standards. It doesn't guarantee a signal clean
   enough to measure frequency drift.
-* **Known limitation:** the checker looks for *thin* lines, because a thin line is
-  what we need to measure frequency precisely. A weak, *wide* signal (like
-  FUNcube-1's data modulation) may be missed. That produces false negatives, not
-  false positives, which fits the "err on the side of no" rule.
+* **Known limitation (now fixed):** the checker only looked for *thin* lines, so it
+  missed FUNcube-1's *wide* data signal. See the update below.
 
 ## Missing metadata for the 10 existing passes
 
@@ -196,3 +191,72 @@ python download_funcube.py --count 50 --hours 48
 python validate_signals.py data/39444      # re-check a folder on its own
 python -m pytest tests/                    # run the tests
 ```
+
+## Update: CNN screen + wide-signal detector (Oct 18)
+
+### Why
+
+Two questions: is the partner's CNN waterfall classifier
+([tlofbj/waterfall-classifier-project-v3.5cnn-lite](https://github.com/tlofbj/waterfall-classifier-project-v3.5cnn-lite))
+better than our checker, and why does our checker accept so few passes?
+
+We tested both on **40 FUNcube-1 passes**: our 10 plus 15 that SatNOGS volunteers rated
+"with signal" and 15 rated "without signal". Each waterfall was also labelled **by
+eye**: 16 have a clear FUNcube-1 signal, 17 are empty, and 7 are too ambiguous to call,
+so they're left out of the scores. The eye labels agreed with SatNOGS's rating on
+27 of 29. One pass rated "without signal" (15221275) has an obvious strong signal.
+
+### What we found
+
+* **The CNN, as shipped, says "signal" for every pass.** Its cut-off is 0.5, but even
+  empty FUNcube-1 waterfalls score about 0.59. Its 95.5% accuracy is logged for an
+  older model file (2025-04-23), not the one in the repo (2025-05-08). Its
+  *ranking* is still useful (AUC 0.90; 1.0 would be perfect), so we kept it with a new
+  cut-off of **0.60**.
+* **Our checker was looking for the wrong shape.** In the audio, FUNcube-1's BPSK
+  telemetry is a **steady band about 1 kHz wide** (near 11.5 kHz for most stations),
+  not a thin line. Peaks inside the band jump around, so the thin-line tracker
+  either fell apart or locked onto thin curves from *other* satellites.
+
+### What changed
+
+1. **`waterfall_cnn.py`** is the partner's network and preprocessing, unchanged (MIT
+   licence, credit in the file), with the new 0.60 cut-off. It runs first on each
+   pass's waterfall image. Below 0.60 the pass is rejected. Above it, the audio check
+   decides, so a high CNN score alone never makes a pass `SIGNAL`. Without PyTorch
+   installed, it's skipped.
+2. **Wide-signal detector** in `validate_signals.py`: it averages power over 800 Hz
+   bands and looks for one that is **louder than the surrounding spectrum, at the same
+   audio frequency, for at least half the recording, by at least 3 dB**. A weaker band
+   (at least 30% of the recording and 1.5 dB) gives `UNCERTAIN`. The thin-line
+   tracker is still used for passes without a wide band.
+3. **`download_funcube.py`** now also saves `obs_<id>_waterfall.png`. It also had a
+   **bug**: the API filter `satellite__norad_cat_id` is silently ignored, so it could
+   download passes of *other satellites*. It now uses `norad_cat_id` and double-checks
+   each record's NORAD ID.
+
+### Results on the 33 clearly-labelled passes
+
+| | Real signals marked `SIGNAL` | Empty passes marked `SIGNAL` |
+|---|---|---|
+| Old audio checker | 4 / 16 | 0 / 17 |
+| Partner's CNN at 0.5 | 16 / 16 | **17 / 17** |
+| Partner's CNN at 0.60 (screen only) | 16 / 16 | 8 / 17 |
+| **New pipeline (CNN screen + audio check)** | **14 / 16** | **0 / 17** |
+
+The 2 real signals still not accepted are `UNCERTAIN`, not lost silently. In both, the
+wide band is weak and the checker locked onto a drifting thin line instead.
+The CNN screen also rejects about half the empty passes before the slower audio
+check runs (~0.04 s vs ~9 s per pass).
+
+The wide-signal detector gave **0 false alarms on 20 extra pure-noise recordings**,
+and the test suite has new synthetic cases: a FUNcube-like band (accepted), a band
+too faint to trust (not accepted), and the CNN screen in both directions.
+
+**Caveat:** both cut-offs were chosen using these same 40 passes, so the numbers
+above are optimistic. Check them on a fresh batch of passes, ideally from more
+ground stations, before trusting them fully.
+
+The report CSV now includes `cnn_score`, `wide_freq_hz`, `wide_fill` and
+`wide_excess_db`. `wide_freq_hz` is where the signal sits in the audio, which is
+the starting point for the next step: tracking the peak through the pass.

@@ -89,6 +89,41 @@ def test_satnogs_without_signal_vote_is_respected(tmp_path):
     assert verdict(path, {"waterfall_status": "without-signal"}) == "UNCERTAIN"
 
 
+def make_wide_signal(tmp_path, name, amp, seed=0):
+    """Noise plus a steady 1 kHz-wide band at 11.5 kHz, like FUNcube-1's BPSK telemetry."""
+    from scipy import signal as sps
+    rng = np.random.default_rng(seed)
+    t = np.arange(DURATION * FS) / FS
+    sos = sps.butter(6, [11000, 12000], btype="bandpass", fs=FS, output="sos")
+    band = sps.sosfilt(sos, rng.normal(0, 1, t.size))
+    gate = (t >= 30) & (t < 150)
+    x = rng.normal(0, 0.1, t.size) + amp * gate * band / band.std()
+    path = tmp_path / f"{name}.wav"
+    sf.write(path, x.astype(np.float32) * 0.5, FS)
+    return path
+
+
+def test_wide_bpsk_like_band_is_accepted(tmp_path):
+    # Band power ~2x the noise in the same frequencies (about +5 dB).
+    assert verdict(make_wide_signal(tmp_path, "bpsk", amp=0.1 * np.sqrt(2 / 48 * 2))) == "SIGNAL"
+
+
+def test_too_faint_wide_band_is_not_accepted(tmp_path):
+    assert verdict(make_wide_signal(tmp_path, "faint", amp=0.1 * np.sqrt(0.1 / 48 * 2))) != "SIGNAL"
+
+
+def test_cnn_screen_rejects_low_scores(tmp_path):
+    path = make_recording(tmp_path, "sat", tone=(0.007, 1500, -0.3, 30, 150))
+    measure = vs.analyse_audio(path)
+    assert vs.decide(measure, None, cnn_prob=vs.CNN_THRESHOLD - 0.01)[0] == "NO_SIGNAL"
+    assert vs.decide(measure, None, cnn_prob=vs.CNN_THRESHOLD + 0.01)[0] == "SIGNAL"
+
+
+def test_high_cnn_score_alone_is_not_enough(tmp_path):
+    path = make_recording(tmp_path, "noise", seed=7)
+    assert vs.decide(vs.analyse_audio(path), None, cnn_prob=0.99)[0] == "NO_SIGNAL"
+
+
 def test_metadata_check():
     assert vs.metadata_status(None)
     full = {"station_lat": 21.3, "station_lng": -157.8, "station_alt": 10,

@@ -3,6 +3,8 @@ Download recent SatNOGS observations (audio + metadata) for one satellite.
 
 For every pass we keep:
   * the audio recording (.ogg)                  -> data/<norad>/obs_<id>.ogg
+  * the SatNOGS waterfall image (.png)          -> data/<norad>/obs_<id>_waterfall.png
+    (used by the CNN signal screen in waterfall_cnn.py)
   * the FULL observation record from SatNOGS    -> data/<norad>/obs_<id>.json
     (ground-station location, the TLE the station used, frequencies, etc.)
   * one summary row per pass in a manifest      -> data/<norad>/manifest.json
@@ -140,7 +142,9 @@ def select_passes(norad_id, status, count, window_hours, separation_min):
     so each one is a distinct pass, not a repeat.
     Returns the full SatNOGS observation records (dicts) that were chosen.
     """
-    params = {"satellite__norad_cat_id": norad_id}
+    # Note: the API silently ignores "satellite__norad_cat_id"; "norad_cat_id" is the
+    # filter that works. Each record's ID is also checked below, to be safe.
+    params = {"norad_cat_id": norad_id}
     if status != "any":
         params["status"] = status
     url = f"{API_BASE}/observations/?{urlencode(params)}"
@@ -157,6 +161,8 @@ def select_passes(norad_id, status, count, window_hours, separation_min):
         pages += 1
 
         for obs in observations:
+            if obs.get("norad_cat_id") not in (None, norad_id):
+                continue                             # a different satellite
             if status != "any" and obs.get("status") != status:
                 continue                             # re-check; a stray slipped through before
             start = parse_time(obs["start"])
@@ -220,6 +226,7 @@ def main():
         audio_field, audio_url = find_audio_url(obs)
         audio_path = out_dir / f"obs_{obs_id}.ogg"
         meta_path = out_dir / f"obs_{obs_id}.json"
+        waterfall_path = out_dir / f"obs_{obs_id}_waterfall.png"
 
         # Always (re)write the metadata: it is small and may have been updated.
         meta_path.write_text(json.dumps(obs, indent=2))
@@ -227,6 +234,9 @@ def main():
             print(f"skip (already have) {audio_path.name}")
         else:
             download(audio_url, audio_path)
+            time.sleep(REQUEST_PAUSE)
+        if obs.get("waterfall") and not waterfall_path.exists():
+            download(obs["waterfall"], waterfall_path)
             time.sleep(REQUEST_PAUSE)
 
         gaps = missing_metadata(obs)
@@ -238,6 +248,7 @@ def main():
             "norad_id": args.norad,
             "audio_file": audio_path.name,
             "metadata_file": meta_path.name,
+            "waterfall_file": waterfall_path.name if waterfall_path.exists() else None,
             "audio_field": audio_field,
             "audio_url": audio_url,
             **{name: obs.get(name) for name in SUMMARY_FIELDS},
