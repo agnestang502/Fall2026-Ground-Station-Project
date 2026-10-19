@@ -37,6 +37,24 @@ def make_recording(tmp_path, name, tone=None, dropouts=False, seed=0):
     return path
 
 
+def make_quieting(tmp_path, name, bursts, depth=0.8, drift_gain=False, seed=0):
+    """
+    Noise whose level drops to `depth` x amplitude during each (start_s, length_s) burst:
+    the "quieting" a strong signal causes in FM-demodulated audio.
+    """
+    rng = np.random.default_rng(seed)
+    t = np.arange(DURATION * FS) / FS
+    gain = np.ones_like(t)
+    if drift_gain:
+        gain *= 1 + 0.1 * np.sin(2 * np.pi * t / DURATION)     # slow station gain wander
+    for start, length in bursts:
+        gain[(t >= start) & (t < start + length)] *= depth
+    x = rng.normal(0, 0.1, t.size) * gain
+    path = tmp_path / f"{name}.wav"
+    sf.write(path, x.astype(np.float32) * 0.5, FS)
+    return path
+
+
 def verdict(path, metadata=None):
     return vs.decide(vs.analyse_audio(path), metadata)[0]
 
@@ -89,9 +107,66 @@ def test_satnogs_without_signal_vote_is_respected(tmp_path):
     assert verdict(path, {"waterfall_status": "without-signal"}) == "UNCERTAIN"
 
 
+def make_wide_signal(tmp_path, name, amp, seed=0):
+    """Noise plus a steady 1 kHz-wide band at 11.5 kHz, like FUNcube-1's BPSK telemetry."""
+    from scipy import signal as sps
+    rng = np.random.default_rng(seed)
+    t = np.arange(DURATION * FS) / FS
+    sos = sps.butter(6, [11000, 12000], btype="bandpass", fs=FS, output="sos")
+    band = sps.sosfilt(sos, rng.normal(0, 1, t.size))
+    gate = (t >= 30) & (t < 150)
+    x = rng.normal(0, 0.1, t.size) + amp * gate * band / band.std()
+    path = tmp_path / f"{name}.wav"
+    sf.write(path, x.astype(np.float32) * 0.5, FS)
+    return path
+
+
+def test_wide_bpsk_like_band_is_accepted(tmp_path):
+    # Band power ~2x the noise in the same frequencies (about +5 dB).
+    assert verdict(make_wide_signal(tmp_path, "bpsk", amp=0.1 * np.sqrt(2 / 48 * 2))) == "SIGNAL"
+
+
+def test_too_faint_wide_band_is_not_accepted(tmp_path):
+    assert verdict(make_wide_signal(tmp_path, "faint", amp=0.1 * np.sqrt(0.1 / 48 * 2))) != "SIGNAL"
+
+
+def test_cnn_screen_rejects_low_scores(tmp_path):
+    path = make_recording(tmp_path, "sat", tone=(0.007, 1500, -0.3, 30, 150))
+    measure = vs.analyse_audio(path)
+    assert vs.decide(measure, None, cnn_prob=vs.CNN_THRESHOLD - 0.01)[0] == "NO_SIGNAL"
+    assert vs.decide(measure, None, cnn_prob=vs.CNN_THRESHOLD + 0.01)[0] == "SIGNAL"
+
+
+def test_high_cnn_score_alone_is_not_enough(tmp_path):
+    path = make_recording(tmp_path, "noise", seed=7)
+    assert vs.decide(vs.analyse_audio(path), None, cnn_prob=0.99)[0] == "NO_SIGNAL"
+
+
 def test_metadata_check():
     assert vs.metadata_status(None)
     full = {"station_lat": 21.3, "station_lng": -157.8, "station_alt": 10,
             "tle1": "1 39444U ...", "tle2": "2 39444 ..."}
     assert vs.metadata_status(full) == []
     assert vs.metadata_status({**full, "tle1": ""}) == ["tle1"]
+
+
+def test_repeated_quiet_bursts_are_accepted(tmp_path):
+    # Four 8-second bursts where the hiss drops by ~2 dB, like obs 15071219.
+    path = make_quieting(tmp_path, "bursts", [(20, 8), (60, 8), (110, 8), (150, 8)])
+    assert verdict(path) == "SIGNAL"
+
+
+def test_two_quiet_bursts_are_not_enough(tmp_path):
+    path = make_quieting(tmp_path, "two", [(40, 8), (120, 8)])
+    assert verdict(path) == "NO_SIGNAL"
+
+
+def test_one_second_blips_are_ignored(tmp_path):
+    blips = [(start, 1) for start in range(10, DURATION - 10, 7)]
+    path = make_quieting(tmp_path, "blips", blips, depth=0.5)
+    assert verdict(path) == "NO_SIGNAL"
+
+
+def test_slow_gain_drift_is_not_a_signal(tmp_path):
+    path = make_quieting(tmp_path, "drift", [], drift_gain=True)
+    assert verdict(path) == "NO_SIGNAL"
