@@ -1,5 +1,13 @@
 # Week 2: Pass metadata + automatic signal validation
 
+> **Correction (Oct 18):** the original 10 recordings used throughout this page
+> (15026718 … 15035384) are **not FUNcube-1**. The first download script had the same
+> satellite-filter bug described at the end, so they're 9 other satellites (KNACKSAT-2,
+> SEEDS, SAUDISAT 1C, …). They now live in `data/wrong_satellite/`. The checker's
+> results on them still show whether *a* satellite signal was present, but not
+> FUNcube-1's. Genuine FUNcube-1 passes: see the update at the end and
+> [peak_tracking.md](peak_tracking.md).
+
 This page explains, in plain language, what the new code does, why, and what it found
 on the 10 FUNcube-1 passes we already downloaded.
 
