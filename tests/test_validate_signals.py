@@ -37,6 +37,24 @@ def make_recording(tmp_path, name, tone=None, dropouts=False, seed=0):
     return path
 
 
+def make_quieting(tmp_path, name, bursts, depth=0.8, drift_gain=False, seed=0):
+    """
+    Noise whose level drops to `depth` x amplitude during each (start_s, length_s) burst:
+    the "quieting" a strong signal causes in FM-demodulated audio.
+    """
+    rng = np.random.default_rng(seed)
+    t = np.arange(DURATION * FS) / FS
+    gain = np.ones_like(t)
+    if drift_gain:
+        gain *= 1 + 0.1 * np.sin(2 * np.pi * t / DURATION)     # slow station gain wander
+    for start, length in bursts:
+        gain[(t >= start) & (t < start + length)] *= depth
+    x = rng.normal(0, 0.1, t.size) * gain
+    path = tmp_path / f"{name}.wav"
+    sf.write(path, x.astype(np.float32) * 0.5, FS)
+    return path
+
+
 def verdict(path, metadata=None):
     return vs.decide(vs.analyse_audio(path), metadata)[0]
 
@@ -130,3 +148,25 @@ def test_metadata_check():
             "tle1": "1 39444U ...", "tle2": "2 39444 ..."}
     assert vs.metadata_status(full) == []
     assert vs.metadata_status({**full, "tle1": ""}) == ["tle1"]
+
+
+def test_repeated_quiet_bursts_are_accepted(tmp_path):
+    # Four 8-second bursts where the hiss drops by ~2 dB, like obs 15071219.
+    path = make_quieting(tmp_path, "bursts", [(20, 8), (60, 8), (110, 8), (150, 8)])
+    assert verdict(path) == "SIGNAL"
+
+
+def test_two_quiet_bursts_are_not_enough(tmp_path):
+    path = make_quieting(tmp_path, "two", [(40, 8), (120, 8)])
+    assert verdict(path) == "NO_SIGNAL"
+
+
+def test_one_second_blips_are_ignored(tmp_path):
+    blips = [(start, 1) for start in range(10, DURATION - 10, 7)]
+    path = make_quieting(tmp_path, "blips", blips, depth=0.5)
+    assert verdict(path) == "NO_SIGNAL"
+
+
+def test_slow_gain_drift_is_not_a_signal(tmp_path):
+    path = make_quieting(tmp_path, "drift", [], drift_gain=True)
+    assert verdict(path) == "NO_SIGNAL"

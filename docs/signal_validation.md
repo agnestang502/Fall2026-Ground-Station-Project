@@ -57,7 +57,10 @@ picture with time on the x-axis and pitch (frequency) on the y-axis. Bright mean
 loud. Pure noise looks like TV static. A satellite shows up as a **thin bright line**,
 and because of the residual Doppler that line bends slowly over the pass.
 
-The check works in four steps:
+The checker looks for the satellite in two different ways, because it can show up
+in the audio in two different ways.
+
+**Way 1: a thin line.** This works in four steps:
 
 1. **Find bright spots.** For each second of audio it measures the local "static
    level" and marks only the spots that are *much* brighter than it.
@@ -73,9 +76,28 @@ The check works in four steps:
    * be **smooth**, not jumpy;
    * **not** stay at exactly one pitch the whole time. A perfectly flat line is
      more likely interference from something near the station than the satellite.
-4. **Quality checks.** The script also looks for audio dropouts (gaps of silence),
-   very short recordings, SatNOGS's own "without-signal" rating, and missing
-   metadata.
+
+**Way 2: "quiet bursts" (added after checking real recordings by hand).** Many
+stations save their audio in a way where the satellite doesn't appear as a line at
+all. Instead, whenever the satellite's signal arrives, **the background hiss suddenly
+gets quieter** for a few seconds. (It's the same reason an FM radio goes quiet
+between songs when it's locked onto a strong station.) FUNcube-1 sends its data in
+bursts, so these recordings show a hiss that keeps dipping for 5–10 seconds at a time.
+
+We confirmed this against the SatNOGS website's own picture (the "waterfall") of pass
+15071219 (Argentina). The satellite's bursts there appear at about 160, 220, 280,
+310 and 340 seconds, and the checker finds quiet bursts at exactly those times.
+
+To count as a signal this way, the recording needs:
+* **at least 3 separate bursts** (1 or 2 could be a fluke);
+* each lasting **at least 4 seconds**, and clearly deeper than the recording's normal
+  second-to-second wobble (and at least 0.8 dB);
+* one-second blips are ignored, and so are slow changes over minutes (a station's
+  volume drifting) and total silence (that's lost audio, not a signal).
+
+**Finally, quality checks.** The script also looks for audio dropouts (gaps of total
+silence), very short recordings, SatNOGS's own "without-signal" rating, and missing
+metadata. Any of these turns a "yes" into "not sure".
 
 Each pass gets one of three verdicts:
 
@@ -94,8 +116,10 @@ The script writes:
 * `validation_report.csv`: one row per pass with the verdict, the reasons, signal
   strength (SNR), start/end frequency of the track, drift rate, duration, file size,
   and the station location;
-* `validation_plots/obs_<id>.png`: the spectrogram with the detected track in red,
-  so a human can double-check any verdict in a couple of seconds.
+  It also lists how many quiet bursts were found and when;
+* `validation_plots/obs_<id>.png`: the spectrogram with the detected track in red
+  on top, and underneath it the hiss level over time with the quiet bursts shaded
+  red, so a human can double-check any verdict in a couple of seconds.
 
 **Machine-learning screen.** The partner's CNN waterfall classifier now runs first;
 see [Update: CNN screen + wide-signal detector](#update-cnn-screen--wide-signal-detector-oct-18).
@@ -105,7 +129,8 @@ see [Update: CNN screen + wide-signal detector](#update-cnn-screen--wide-signal-
 We can't know the right answer for real recordings, so the tests use **fake
 recordings where we do know it**: pure noise, noise plus a weak drifting tone, a tone
 that's too short, a constant interference tone, a recording with gaps, and another
-satellite sweeping across the band. Results:
+satellite sweeping across the band. For the quiet bursts: four real-looking bursts,
+only two bursts, lots of one-second blips, and a slowly drifting volume. Results:
 
 * **Pure noise: 0 false alarms in 25 separate noise recordings** (5 in the test suite
   and 20 more in a separate run).
@@ -113,28 +138,53 @@ satellite sweeping across the band. Results:
   (roughly 5 dB above the noise in a 6 Hz slice). Below that, it's rejected.
 * Constant tones, recordings with gaps, and a crossing satellite are all kept out of
   `SIGNAL`.
+* Four quiet bursts about 2 dB deep are accepted. Two bursts, one-second blips, and a
+  slowly drifting volume are all rejected. Pure noise still gave **0 false alarms**
+  in another 20 tries with the burst check switched on.
 * The downloader's pass-picking logic is tested against a fake SatNOGS response.
   It skips passes that are too old, too close together, missing audio, or have the
   wrong status, and it saves the location and TLE.
 
 Run them with `python -m pytest tests/`.
 
-## Results on our 10 FUNcube-1 passes
+## Results
 
-| Pass | Verdict | Why |
-|---|---|---|
-| 15028454 | **SIGNAL** | smooth line from 510 to 398 Hz for 257 s, drifting −0.30 Hz/s, 22 dB above the noise |
-| 15034145 | UNCERTAIN | line at exactly 1465 Hz for 63 s with zero drift, so it could be interference |
-| 15026718, 15026767, 15030415, 15035384 | NO_SIGNAL | nothing above the noise |
-| 15033065, 15034070, 15034244, 15034713 | NO_SIGNAL | only short fragments (3–13 s); 15034244 and 15033065 also have audio dropouts |
+### First version (thin lines only), on 29 passes
 
-**So only 1 of 10 passes survives**, even though SatNOGS had rated all 10 as "good".
+Only **1 of 29** passes passed. But when we compared with the SatNOGS website's
+pictures by hand, several "no" passes clearly had the satellite in them, as short
+wide bursts. That's how we found Way 2 above. The hand-check did its job.
 
-Example plots (red dots = detected track):
+### Current version (lines + quiet bursts), on the 13 recordings available here
 
-![Validated signal](img/example_signal.png)
-*Pass 15028454: the slowly bending red line is the kind of residual drift we'll use
-later. The steep curves are other signals sweeping through; the checker ignores them.*
+> **Warning (found Oct 18):** the downloader had a bug that fetched passes of *other
+> satellites* (see the update at the end). 15071219 is actually **OPTISAT**, 15068778
+> is **FRONTIERSAT** and 15070276 is **KNACKSAT-2**, not FUNcube-1. So the quiet-burst
+> check was developed on other satellites' recordings. Its results on real FUNcube-1
+> passes are in the update at the end.
+
+| Pass | Station | Verdict | Why |
+|---|---|---|---|
+| 15071219 | LW2DYB (Argentina) | **SIGNAL** | 8 quiet bursts, matching the SatNOGS waterfall |
+| 15068778 | DL2SKY (Germany) | **SIGNAL** | 4 quiet bursts (61–71, 222–225, 288–295, 302–309 s) |
+| 15034244 | (old file) | **SIGNAL** | 10 quiet bursts. *Not yet checked against its SatNOGS waterfall* |
+| 15028454 | (old file) | **SIGNAL** | smooth line from 510 to 398 Hz for 257 s, drifting −0.30 Hz/s |
+| 15034145 | (old file) | UNCERTAIN | a perfectly flat line, which could be interference |
+| 15070276 | Berowra (Australia) | NO_SIGNAL | nothing: no line, no bursts (agrees with the hand-check) |
+| 7 other old files | | NO_SIGNAL | nothing, or only 1–2 bursts / short fragments |
+
+**4 of 13 now pass**, up from 1. The other 16 new recordings are on Agnes's computer.
+Re-running the checker there will give the full count.
+
+![Quiet bursts](img/example_bursts.png)
+*Pass 15071219 (Argentina). Bottom panel: the hiss level. Each red band is a quiet
+burst, which is when the satellite was transmitting. The two deepest ones (around
+10 s and 310 s) also show the signal itself in the top panel.*
+
+![Line signal](img/example_signal.png)
+*Pass 15028454: a different station's audio, where the satellite does show up as a
+thin, slowly bending line. The steep curves are other signals sweeping through; the
+checker ignores them.*
 
 ![Uncertain](img/example_uncertain.png)
 *Pass 15034145: a perfectly flat tone. It might be the satellite, but it might be local
@@ -145,13 +195,20 @@ interference, so it's rejected.*
 
 ### What this tells us
 
-* **We should download many more than 10 passes.** Expect roughly 1 in 10 (this is a
-  very small sample) to be usable, so aim for 50 to 100 per satellite.
-* **SatNOGS's "good" rating isn't enough on its own.** A "good" rating says the
-  observation worked by SatNOGS's standards. It doesn't guarantee a signal clean
-  enough to measure frequency drift.
-* **Known limitation (now fixed):** the checker only looked for *thin* lines, so it
-  missed FUNcube-1's *wide* data signal. See the update below.
+* **Always check the checker against real examples.** The first version looked fine
+  on fake recordings but missed most real signals. Keep spot-checking a few passes
+  against the SatNOGS waterfall, especially for a new satellite or new stations.
+* **SatNOGS's "good" rating isn't enough on its own.** Some "good" passes really are
+  empty (like 15070276).
+* **Some stations probably can't hear this satellite well.** Several stations in the
+  list have "UHF" in their name, but FUNcube-1 transmits on VHF.
+* **A heads-up for the next phase.** In "quiet burst" recordings we know *when* the
+  satellite was heard, but the audio doesn't show its exact pitch the way a thin line
+  does. To measure the frequency shift, we may need the SatNOGS waterfall data (which
+  keeps pitch information) or a different way of processing the audio. That's worth
+  discussing with the mentor.
+* **Known limitation (now fixed):** the thin-line check missed FUNcube-1's *wide* data
+  signal. See the update below.
 
 ## Missing metadata for the 10 existing passes
 
@@ -252,6 +309,19 @@ check runs (~0.04 s vs ~9 s per pass).
 The wide-signal detector gave **0 false alarms on 20 extra pure-noise recordings**,
 and the test suite has new synthetic cases: a FUNcube-like band (accepted), a band
 too faint to trust (not accepted), and the CNN screen in both directions.
+
+### Combined with the quiet-burst detector
+
+The quiet-burst detector ("Way 2" above) was added in a separate session and merged
+in afterwards, so the checker now has **three** ways to find a signal: wide band, thin
+line, quiet bursts. On the same 40 passes the combined checker gives **the same scores
+as the table above** (14/16 real, 0/17 empty), so the burst check added **no false
+alarms**. It changed only one verdict: 15034244 (one of the 7 ambiguous passes) is
+now `SIGNAL` from 10 quiet bursts. Its waterfall does show short bursts at the right
+frequency, and SatNOGS rated it "with signal", so that looks right.
+
+Remember that the burst check was originally tuned on other satellites (see the warning
+above), so it has only this one FUNcube-1 example in its favour so far.
 
 **Caveat:** both cut-offs were chosen using these same 40 passes, so the numbers
 above are optimistic. Check them on a fresh batch of passes, ideally from more

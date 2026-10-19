@@ -5,9 +5,14 @@ For every obs_<id>.ogg in a folder (made by download_funcube.py) this script:
   0. screens the SatNOGS waterfall image (obs_<id>_waterfall.png) with the CNN
      classifier in waterfall_cnn.py; a low score rejects the pass immediately,
   1. turns the audio into a spectrogram (signal strength vs. frequency vs. time),
-  2. looks for the satellite after Doppler correction: either a steady ~1 kHz-wide
-     band (FUNcube-1's BPSK telemetry) or a thin line that drifts slowly, standing
-     well above the noise for a good stretch of the pass,
+  2. looks for signs of the satellite after Doppler correction:
+     a) a steady ~1 kHz-wide band (FUNcube-1's BPSK telemetry),
+     b) a narrow signal that stands well above the noise AND forms a continuous,
+        slowly drifting track for a good stretch of the pass, or
+     c) repeated "quiet bursts": several seconds at a time when the background hiss
+        drops. Many stations record FM-demodulated audio, and in that audio a
+        strong signal shows up as the hiss going quiet rather than as a line
+        (checked against the SatNOGS waterfall of observation 15071219),
   3. runs quality checks (dropouts, very short recording, a constant tone that is
      probably local interference rather than the satellite),
   4. checks the metadata we need later (ground-station location and TLE),
@@ -69,7 +74,14 @@ MAX_ACCEPT_DRIFT = 1.5     # Hz/s: SatNOGS already removes the predicted Doppler
 MAX_SCATTER_HZ = 8.0       # track wobble around a smooth curve; jumpy = likely not ours
 SPUR_MAX_DRIFT = 0.02      # Hz/s: a track whose frequency never moves could just as
                            # well be local interference, so it is not trusted
-DROPOUT_FRACTION_MAX = 0.1 # >10% of frames with (almost) no audio -> flag
+QUIET_MIN_DB = 0.8         # a quiet burst: hiss at least this many dB below normal...
+QUIET_Z = 4.0              # ...and this many times the recording's usual wobble...
+MIN_BURST_SEC = 4          # ...for at least this many seconds in a row
+MIN_BURSTS = 3             # need this many separate bursts (1-2 could be a fluke)
+BASELINE_SEC = 121         # window (s) for the normal hiss level
+SILENCE_DB = 20.0          # a drop deeper than this is lost audio, not a signal
+
+DROPOUT_FRACTION_MAX = 0.1 # >10% of frames with no audio at all -> flag
 MIN_DURATION_S = 60.0      # recordings shorter than this are flagged
 
 NEEDED_METADATA = ("station_lat", "station_lng", "station_alt", "tle1", "tle2")
@@ -234,9 +246,10 @@ def analyse_audio(path):
 
     # Dropouts: frames whose total power collapses (lost samples / silence).
     power = S.sum(axis=0)
-    dropout_frac = float(np.mean(power < 0.1 * np.median(power)))
+    dropout_frac = float(np.mean(power < np.median(power) / 10 ** (SILENCE_DB / 10)))
 
     band = usable_band(freqs, S)
+    level_db, bursts = quiet_bursts(S[band], times)
     z, ratio = snr_zscores(freqs[band], S[band])
     frame_dt = float(np.median(np.diff(times))) if len(times) > 1 else FRAME_SEC
     tracks = link_tracks(frame_peaks(freqs[band], z, ratio), frame_dt)
@@ -250,8 +263,38 @@ def analyse_audio(path):
         "dropout_fraction": dropout_frac,
         "best_track": tracks[0] if tracks else None,
         "wide_signal": find_wide_signal(freqs[band], S[band]),
-        "_plot": (freqs[band], times, z),
+        "bursts": bursts,
+        "_plot": (freqs[band], times, z, level_db),
     }
+
+
+def quiet_bursts(S, times):
+    """
+    Find stretches where the total hiss level drops (the FM "quieting" a strong
+    signal causes). Returns (level_db per frame relative to normal, list of bursts);
+    each burst is {"start_s", "end_s", "depth_db"}.
+    """
+    level = 10 * np.log10(S.sum(axis=0) + 1e-30)
+    # "Normal" hiss level: a 2-minute running median, so slow drifts in a station's
+    # gain over the pass aren't mistaken for bursts.
+    level = level - ndimage.median_filter(level, size=BASELINE_SEC, mode="nearest")
+    smooth = ndimage.median_filter(level, size=3, mode="nearest")   # ignore 1-s blips
+    # Second-to-second wobble (from differences, so bursts themselves don't inflate it).
+    step = np.diff(smooth)
+    wobble = 1.4826 * np.median(np.abs(step - np.median(step))) / np.sqrt(2)
+    threshold = -max(QUIET_MIN_DB, QUIET_Z * wobble)
+    quiet = (smooth < threshold) & (smooth > -SILENCE_DB)
+
+    bursts, start = [], None
+    for i, q in enumerate(np.append(quiet, False)):
+        if q and start is None:
+            start = i
+        elif not q and start is not None:
+            if i - start >= MIN_BURST_SEC:
+                bursts.append({"start_s": float(times[start]), "end_s": float(times[i - 1]),
+                               "depth_db": float(smooth[start:i].min())})
+            start = None
+    return level, bursts
 
 
 def decide(measure, metadata, cnn_prob=None):
@@ -269,39 +312,49 @@ def decide(measure, metadata, cnn_prob=None):
     reasons, doubts = [], []
     tr = measure["best_track"]
     wide = measure.get("wide_signal")
-    thin_found = (tr is not None and tr["hits"] >= MIN_TRACK_HITS
+    bursts = measure["bursts"]
+    line_found = (tr is not None and tr["hits"] >= MIN_TRACK_HITS
                   and tr["fill"] >= MIN_TRACK_FILL and tr["median_z"] >= MIN_MEDIAN_Z)
     wide_found = (wide is not None and wide["fill"] >= BAND_MIN_FILL
                   and wide["excess_db"] >= BAND_MIN_EXCESS_DB)
+    bursts_found = len(bursts) >= MIN_BURSTS
 
     if wide_found:
         # A steady wide band is what Doppler-corrected FUNcube-1 telemetry looks like.
         # Thin lines elsewhere in the same recording are usually other satellites.
         reasons.append(f"steady wide signal at {wide['freq_hz']:.0f} Hz in {wide['fill']:.0%} "
                        f"of the pass ({wide['excess_db']:.1f} dB above the noise)")
-    elif thin_found:
+    if line_found and not wide_found:
         reasons.append(f"track {tr['freq_start_hz']:.0f}->{tr['freq_end_hz']:.0f} Hz for "
                        f"{tr['hits']} s (drift {tr['drift_hz_per_s']:+.2f} Hz/s, "
                        f"SNR {tr['median_snr_db']:.1f} dB)")
-        if abs(tr["drift_hz_per_s"]) > MAX_ACCEPT_DRIFT:
-            doubts.append(f"drifts {tr['drift_hz_per_s']:+.1f} Hz/s, too fast for the "
-                          "Doppler-corrected target (maybe another satellite)")
-        if tr["scatter_hz"] > MAX_SCATTER_HZ:
-            doubts.append(f"track is jumpy ({tr['scatter_hz']:.0f} Hz scatter)")
-        if abs(tr["drift_hz_per_s"]) < SPUR_MAX_DRIFT:
-            doubts.append("frequency never changes, so it can't be told apart from local interference")
-    elif (wide is not None and wide["fill"] >= BAND_WEAK_FILL
-          and wide["excess_db"] >= BAND_WEAK_EXCESS_DB):
-        reasons.append(f"weak wide signal at {wide['freq_hz']:.0f} Hz in {wide['fill']:.0%} "
-                       f"of the pass ({wide['excess_db']:.1f} dB above the noise)")
-        doubts.append("too weak or patchy to measure reliably")
-    else:
-        if tr is None:
-            reasons.append("no narrowband signal above the noise")
+        if not bursts_found:         # the line is the only evidence, so its doubts count
+            if abs(tr["drift_hz_per_s"]) > MAX_ACCEPT_DRIFT:
+                doubts.append(f"drifts {tr['drift_hz_per_s']:+.1f} Hz/s, too fast for the "
+                              "Doppler-corrected target (maybe another satellite)")
+            if tr["scatter_hz"] > MAX_SCATTER_HZ:
+                doubts.append(f"track is jumpy ({tr['scatter_hz']:.0f} Hz scatter)")
+            if abs(tr["drift_hz_per_s"]) < SPUR_MAX_DRIFT:
+                doubts.append("frequency never changes, so it can't be told apart "
+                              "from local interference")
+    if bursts_found:
+        times = ", ".join(f"{b['start_s']:.0f}-{b['end_s']:.0f}" for b in bursts)
+        reasons.append(f"{len(bursts)} quiet bursts where the hiss drops (at {times} s)")
+
+    if not (wide_found or line_found or bursts_found):
+        if (wide is not None and wide["fill"] >= BAND_WEAK_FILL
+                and wide["excess_db"] >= BAND_WEAK_EXCESS_DB):
+            reasons.append(f"weak wide signal at {wide['freq_hz']:.0f} Hz in {wide['fill']:.0%} "
+                           f"of the pass ({wide['excess_db']:.1f} dB above the noise)")
+            doubts.append("too weak or patchy to measure reliably")
         else:
-            reasons.append(f"strongest track too weak/short ({tr['hits']} s of detections, "
-                           f"fill {tr['fill']:.0%}, SNR {tr['median_snr_db']:.1f} dB)")
-        return "NO_SIGNAL", False, reasons
+            if tr is None:
+                reasons.append("no narrowband signal above the noise")
+            else:
+                reasons.append(f"strongest track too weak/short ({tr['hits']} s of detections, "
+                               f"fill {tr['fill']:.0%}, SNR {tr['median_snr_db']:.1f} dB)")
+            reasons.append(f"{len(bursts)} quiet burst(s), need {MIN_BURSTS}")
+            return "NO_SIGNAL", False, reasons
 
     if measure["dropout_fraction"] > DROPOUT_FRACTION_MAX:
         doubts.append(f"audio dropouts in {measure['dropout_fraction']:.0%} of the recording")
@@ -327,8 +380,9 @@ def save_plot(path, measure, verdict, out_png):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    freqs, times, z = measure["_plot"]
-    fig, ax = plt.subplots(figsize=(10, 4))
+    freqs, times, z, level_db = measure["_plot"]
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
+                                  gridspec_kw={"height_ratios": [3, 1]})
     ax.imshow(np.clip(z, -2, 12), aspect="auto", origin="lower", cmap="viridis",
               extent=[times[0], times[-1], freqs[0], freqs[-1]], interpolation="nearest")
     tr = measure["best_track"]
@@ -340,9 +394,15 @@ def save_plot(path, measure, verdict, out_png):
         ax.axhline(wide["freq_hz"], color="orange", lw=1, ls="--", label="wide signal centre")
     if tr or wide:
         ax.legend(loc="upper right")
-    ax.set_xlabel("time since start of recording (s)")
     ax.set_ylabel("audio frequency (Hz)")
     ax.set_title(f"{path.name}: {verdict}")
+
+    ax2.plot(times, level_db, lw=0.8)
+    for b in measure["bursts"]:
+        ax2.axvspan(b["start_s"], b["end_s"], color="red", alpha=0.3)
+    ax2.set_ylim(max(-10, level_db.min() - 0.5), max(1, level_db.max() + 0.5))
+    ax2.set_ylabel("hiss level (dB)")
+    ax2.set_xlabel("time since start of recording (s)  (red = quiet burst)")
     fig.tight_layout()
     fig.savefig(out_png, dpi=80)
     plt.close(fig)
@@ -397,6 +457,9 @@ def validate_folder(folder, plots=True, use_cnn=True):
             "wide_freq_hz": round(wide.get("freq_hz", 0.0), 1),
             "wide_fill": round(wide.get("fill", 0.0), 2),
             "wide_excess_db": round(wide.get("excess_db", 0.0), 1),
+            "quiet_bursts": len(measure["bursts"]),
+            "burst_times_s": " ".join(f"{b['start_s']:.0f}-{b['end_s']:.0f}"
+                                      for b in measure["bursts"]),
             "station_name": (metadata or {}).get("station_name"),
             "station_lat": (metadata or {}).get("station_lat"),
             "station_lng": (metadata or {}).get("station_lng"),
