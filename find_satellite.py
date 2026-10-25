@@ -24,12 +24,11 @@ from pathlib import Path
 from skyfield.api import EarthSatellite, load, wgs84
 
 # --- The satellite we simulate (override on the command line) -----------------
-# Chosen on SatNOGS DB (https://db.satnogs.org): it needs a transmitter with mode CW
-# that is marked active, and recent good observations on SatNOGS Network.
-# FUNcube-1 is a stand-in until that choice is made: it's the satellite the rest of
-# this repo uses, but its 145.935 MHz beacon is BPSK telemetry, not CW.
-NORAD_ID = 39444                 # FUNcube-1 (AO-73)
-BEACON_HZ = 145_935_000          # beacon frequency f_0, in Hz
+# Chosen with pick_satellite.py on 2026-10-25: an active CW beacon on SatNOGS DB,
+# on 70 cm, in a ~500 km sun-synchronous orbit, with 25+ good SatNOGS Network
+# observations in the previous 7 days.
+NORAD_ID = 57172                 # UmKA-1 (RS40S)
+BEACON_HZ = 437_625_000          # "Mode U - CW" beacon, f_0 in Hz
 
 CELESTRAK_URL = "https://celestrak.org/NORAD/elements/gp.php?CATNR={norad}&FORMAT=TLE"
 TLE_DIR = Path(__file__).parent / "data" / "tle"   # git-ignored cache of fetched TLEs

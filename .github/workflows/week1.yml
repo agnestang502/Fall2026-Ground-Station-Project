@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       norad:
-        description: "NORAD ID to locate (blank = top-ranked CW candidate)"
+        description: "NORAD ID to locate (blank = the default in find_satellite.py)"
         required: false
 
 jobs:
@@ -27,16 +27,16 @@ jobs:
         env:
           NORAD: ${{ inputs.norad }}
         run: |
-          read NORAD_PICK FREQ <<< "$(python - <<'EOF'
-          import json, os
-          rows = json.load(open("data/cw_candidates.json"))
-          want = os.environ.get("NORAD")
-          r = next(r for r in rows if not want or r["norad"] == int(want))
-          print(r["norad"], r["downlink_hz"])
-          EOF
-          )"
-          python find_satellite.py --norad "$NORAD_PICK" --freq-hz "$FREQ" --ground-track
+          if [ -z "$NORAD" ]; then
+            python find_satellite.py --ground-track     # the default satellite
+          else
+            FREQ=$(python -c "import json, os; print(next(r['downlink_hz'] for r in json.load(open('data/cw_candidates.json')) if r['norad'] == int(os.environ['NORAD'])))")
+            python find_satellite.py --norad "$NORAD" --freq-hz "$FREQ" --ground-track
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: week1-results
-          path: data/
+          path: |
+            data/cw_candidates.json
+            data/tle/
+            data/plots/
