@@ -32,6 +32,7 @@ EARTH_RADIUS_KM = 6378.135       # WGS72, the radius SGP4 uses
 MU_KM3_S2 = 398600.8             # WGS72 gravitational parameter
 OBS_PAGE_SIZE = 25               # SatNOGS Network returns 25 observations per page
 REQUEST_PAUSE = 2                # seconds between SatNOGS Network requests
+DEBUG = False                    # --debug: print what the SatNOGS DB API returns
 USER_AGENT = "funcube-orbit-project/0.5 (student ground-station project)"
 
 
@@ -56,6 +57,16 @@ def cw_transmitters():
                                                          {"format": "json"}))
              if s.get("status") == "alive" and s.get("norad_cat_id")}
     txs = json.loads(get(f"{DB_API}/transmitters/", {"format": "json"}))
+    if DEBUG:
+        from collections import Counter
+        sats = json.loads(get(f"{DB_API}/satellites/", {"format": "json"}))
+        print("satellites:", type(sats).__name__, len(sats), "| alive:", len(alive))
+        print("sample satellite:", json.dumps(sats[0] if isinstance(sats, list) else sats)[:800])
+        print("transmitters:", type(txs).__name__, len(txs))
+        print("sample transmitter:", json.dumps(txs[0] if isinstance(txs, list) else txs)[:800])
+        for key in ("mode", "status", "alive", "type", "service"):
+            print(key, Counter(str(t.get(key)) for t in txs).most_common(12))
+        print("satellite status", Counter(str(s.get("status")) for s in sats).most_common())
     return [dict(t, sat_name=alive[t["norad_cat_id"]]["name"]) for t in txs
             if t.get("mode") == "CW" and t.get("status") == "active" and t.get("alive")
             and t.get("downlink_low") and t.get("norad_cat_id") in alive]
@@ -96,7 +107,10 @@ def main():
     p = argparse.ArgumentParser(description="Rank satellites with active CW beacons.")
     p.add_argument("--days", type=float, default=7, help="observation window (days)")
     p.add_argument("--top", type=int, default=20, help="how many to print")
+    p.add_argument("--debug", action="store_true", help="print SatNOGS DB field values")
     args = p.parse_args()
+    global DEBUG
+    DEBUG = args.debug
 
     txs = cw_transmitters()
     print(f"{len(txs)} active CW transmitters on alive satellites (SatNOGS DB)")
