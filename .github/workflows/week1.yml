@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
       - run: pip install skyfield numpy matplotlib plotly
       - name: Rank CW satellites
-        run: python pick_satellite.py --top 25 --debug
+        run: python pick_satellite.py --top 25
       - name: Find the chosen satellite
         env:
           NORAD: ${{ inputs.norad }}

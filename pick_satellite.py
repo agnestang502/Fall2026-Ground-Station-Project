@@ -52,10 +52,10 @@ def get(url, params=None, retries=3):
 
 
 def cw_transmitters():
-    """Active, alive CW transmitters on satellites SatNOGS lists as alive."""
+    """Active, alive CW transmitters on satellites SatNOGS lists as in orbit."""
     alive = {s["norad_cat_id"]: s for s in json.loads(get(f"{DB_API}/satellites/",
                                                          {"format": "json"}))
-             if s.get("status") == "alive" and s.get("norad_cat_id")}
+             if s.get("status") == "in orbit" and s.get("norad_cat_id")}
     txs = json.loads(get(f"{DB_API}/transmitters/", {"format": "json"}))
     if DEBUG:
         from collections import Counter
@@ -113,7 +113,7 @@ def main():
     DEBUG = args.debug
 
     txs = cw_transmitters()
-    print(f"{len(txs)} active CW transmitters on alive satellites (SatNOGS DB)")
+    print(f"{len(txs)} active CW transmitters on satellites in orbit (SatNOGS DB)")
     tles = parse_tles(get(CELESTRAK_ACTIVE))
     print(f"{len(tles)} TLEs from CelesTrak's active group")
 
