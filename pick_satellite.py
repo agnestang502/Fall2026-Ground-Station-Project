@@ -17,9 +17,11 @@ import argparse
 import json
 import math
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 DB_API = "https://db.satnogs.org/api"
@@ -31,8 +33,8 @@ ALT_RANGE_KM = (300, 1000)       # same range as the Week 1 checkpoint
 EARTH_RADIUS_KM = 6378.135       # WGS72, the radius SGP4 uses
 MU_KM3_S2 = 398600.8             # WGS72 gravitational parameter
 OBS_PAGE_SIZE = 25               # SatNOGS Network returns 25 observations per page
-REQUEST_PAUSE = 2                # seconds between SatNOGS Network requests
-DEBUG = False                    # --debug: print what the SatNOGS DB API returns
+REQUEST_PAUSE = 6                # seconds between SatNOGS Network requests
+MAX_RETRY_WAIT = 300             # longest we wait after a 429 Too Many Requests
 USER_AGENT = "funcube-orbit-project/0.5 (student ground-station project)"
 
 
@@ -47,29 +49,24 @@ def get(url, params=None, retries=3):
         except OSError as err:
             if attempt == retries - 1:
                 raise
-            print(f"  retrying {url} ({err})")
-            time.sleep(10 * (attempt + 1))
+            wait = 10 * (attempt + 1)
+            if isinstance(err, HTTPError) and err.code == 429:    # rate limited
+                wait = min(int(err.headers.get("Retry-After") or 60), MAX_RETRY_WAIT)
+            print(f"  retrying in {wait} s: {url} ({err})", flush=True)
+            time.sleep(wait)
 
 
 def cw_transmitters():
     """Active, alive CW transmitters on satellites SatNOGS lists as in orbit."""
-    alive = {s["norad_cat_id"]: s for s in json.loads(get(f"{DB_API}/satellites/",
-                                                         {"format": "json"}))
-             if s.get("status") == "in orbit" and s.get("norad_cat_id")}
+    in_orbit = {s["norad_cat_id"]: s for s in json.loads(get(f"{DB_API}/satellites/",
+                                                            {"format": "json"}))
+                if s.get("status") == "in orbit" and s.get("norad_cat_id")}
     txs = json.loads(get(f"{DB_API}/transmitters/", {"format": "json"}))
-    if DEBUG:
-        from collections import Counter
-        sats = json.loads(get(f"{DB_API}/satellites/", {"format": "json"}))
-        print("satellites:", type(sats).__name__, len(sats), "| alive:", len(alive))
-        print("sample satellite:", json.dumps(sats[0] if isinstance(sats, list) else sats)[:800])
-        print("transmitters:", type(txs).__name__, len(txs))
-        print("sample transmitter:", json.dumps(txs[0] if isinstance(txs, list) else txs)[:800])
-        for key in ("mode", "status", "alive", "type", "service"):
-            print(key, Counter(str(t.get(key)) for t in txs).most_common(12))
-        print("satellite status", Counter(str(s.get("status")) for s in sats).most_common())
-    return [dict(t, sat_name=alive[t["norad_cat_id"]]["name"]) for t in txs
+    return [dict(t, sat_name=in_orbit[t["norad_cat_id"]]["name"],
+                 reception=in_orbit[t["norad_cat_id"]].get("reception_status") or "Unknown")
+            for t in txs
             if t.get("mode") == "CW" and t.get("status") == "active" and t.get("alive")
-            and t.get("downlink_low") and t.get("norad_cat_id") in alive]
+            and t.get("downlink_low") and t.get("norad_cat_id") in in_orbit]
 
 
 def parse_tles(text):
@@ -96,30 +93,33 @@ def orbit_from_tle(line1, line2):
 
 
 def good_observations(norad, since):
-    """Number of good observations since `since` (capped at one page, 25)."""
-    page = json.loads(get(f"{NETWORK_API}/observations/", {
-        "format": "json", "satellite__norad_cat_id": norad, "status": "good",
-        "start": since.strftime("%Y-%m-%dT%H:%M:%SZ")}))
+    """Number of good observations since `since` (capped at one page, 25), or None
+    if SatNOGS Network keeps refusing the request."""
+    try:
+        page = json.loads(get(f"{NETWORK_API}/observations/", {
+            "format": "json", "satellite__norad_cat_id": norad, "status": "good",
+            "start": since.strftime("%Y-%m-%dT%H:%M:%SZ")}))
+    except OSError as err:
+        print(f"  gave up on NORAD {norad}: {err}", flush=True)
+        return None
     return len(page)
 
 
 def main():
     p = argparse.ArgumentParser(description="Rank satellites with active CW beacons.")
     p.add_argument("--days", type=float, default=7, help="observation window (days)")
+    p.add_argument("--check", type=int, default=20,
+                   help="how many satellites to look up on SatNOGS Network (rate-limited)")
     p.add_argument("--top", type=int, default=20, help="how many to print")
-    p.add_argument("--debug", action="store_true", help="print SatNOGS DB field values")
     args = p.parse_args()
-    global DEBUG
-    DEBUG = args.debug
 
     txs = cw_transmitters()
     print(f"{len(txs)} active CW transmitters on satellites in orbit (SatNOGS DB)")
     tles = parse_tles(get(CELESTRAK_ACTIVE))
     print(f"{len(tles)} TLEs from CelesTrak's active group")
 
-    since = datetime.now(timezone.utc) - timedelta(days=args.days)
     lo, hi = ALT_RANGE_KM
-    rows, checked = [], {}
+    rows = []
     for t in txs:
         norad = t["norad_cat_id"]
         if norad not in tles:
@@ -128,28 +128,43 @@ def main():
         inc, perigee, apogee, epoch = orbit_from_tle(l1, l2)
         if not (lo <= perigee and apogee <= hi):
             continue
-        if norad not in checked:
-            time.sleep(REQUEST_PAUSE)
-            checked[norad] = good_observations(norad, since)
         rows.append({
             "norad": norad, "name": t["sat_name"], "tle_name": name,
             "transmitter": t["description"], "uuid": t["uuid"],
             "downlink_hz": t["downlink_low"], "service": t.get("service"),
+            "reception_status": t["reception"],
             "inclination_deg": round(inc, 2), "perigee_km": round(perigee),
             "apogee_km": round(apogee), "tle_epoch": epoch.isoformat(timespec="seconds"),
             "tle_line1": l1, "tle_line2": l2,
-            "good_obs_recent": checked[norad], "obs_window_days": args.days,
+            "good_obs_recent": None, "obs_window_days": args.days,
         })
-    rows.sort(key=lambda r: (-r["good_obs_recent"], -r["downlink_hz"]))
+    print(f"{len(rows)} of them in {lo}-{hi} km orbits; SatNOGS reception status: "
+          f"{dict(Counter(r['reception_status'] for r in rows))}")
 
-    print(f"\n{len(rows)} CW transmitters in {lo}-{hi} km orbits, ranked by good "
-          f"observations in the last {args.days:g} days ({OBS_PAGE_SIZE} = {OBS_PAGE_SIZE}+):")
+    # SatNOGS Network allows only a few requests a minute, so look up the most
+    # promising satellites first: a known reception status, then the freshest TLE.
+    rows.sort(key=lambda r: r["tle_epoch"], reverse=True)
+    rows.sort(key=lambda r: r["reception_status"] == "Unknown")
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    checked = {}
+    for r in rows:
+        if r["norad"] not in checked and len(checked) < args.check:
+            time.sleep(REQUEST_PAUSE)
+            checked[r["norad"]] = good_observations(r["norad"], since)
+            print(f"  {r['norad']:>6} {r['name']}: {checked[r['norad']]} good obs", flush=True)
+        r["good_obs_recent"] = checked.get(r["norad"])
+    rows.sort(key=lambda r: (-1 if r["good_obs_recent"] is None else -r["good_obs_recent"],
+                             -r["downlink_hz"]))
+
+    print(f"\nCW transmitters in {lo}-{hi} km orbits, ranked by good observations "
+          f"in the last {args.days:g} days ({OBS_PAGE_SIZE} = {OBS_PAGE_SIZE}+, - = not checked):")
     print(f"{'NORAD':>6}  {'satellite':<22} {'f_0 (MHz)':>10}  {'inc':>6}  "
-          f"{'perigee-apogee':>15}  {'good obs':>8}  transmitter")
+          f"{'perigee-apogee':>15}  {'good obs':>8}  {'reception':<10} transmitter")
     for r in rows[:args.top]:
+        obs = "-" if r["good_obs_recent"] is None else r["good_obs_recent"]
         print(f"{r['norad']:>6}  {r['name'][:22]:<22} {r['downlink_hz'] / 1e6:>10.4f}  "
               f"{r['inclination_deg']:>6.2f}  {r['perigee_km']:>6}-{r['apogee_km']:<5} km  "
-              f"{r['good_obs_recent']:>8}  {r['transmitter']}")
+              f"{obs:>8}  {r['reception_status'][:10]:<10} {r['transmitter']}")
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(rows, indent=2))
