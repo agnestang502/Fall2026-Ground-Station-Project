@@ -3,6 +3,7 @@ Week 1 helper: find satellites with an active CW beacon to simulate.
 
 Lists every transmitter on SatNOGS DB with mode CW that is marked active and
 alive, on a satellite SatNOGS lists as alive, then for each one:
+  * keeps it if it's on the 2 m or 70 cm amateur-satellite sub-band,
   * looks up its TLE on CelesTrak and works out its perigee and apogee altitude,
   * counts its "good" observations on SatNOGS Network in the last few days.
 
@@ -30,6 +31,8 @@ CELESTRAK_ACTIVE = "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FOR
 OUT_PATH = Path(__file__).parent / "data" / "cw_candidates.json"
 
 ALT_RANGE_KM = (300, 1000)       # same range as the Week 1 checkpoint
+BANDS_HZ = ((144.0e6, 146.0e6),  # amateur-satellite sub-bands most SatNOGS stations
+            (435.0e6, 438.0e6))  # listen on: 2 m (VHF) and 70 cm (UHF)
 EARTH_RADIUS_KM = 6378.135       # WGS72, the radius SGP4 uses
 MU_KM3_S2 = 398600.8             # WGS72 gravitational parameter
 OBS_PAGE_SIZE = 25               # SatNOGS Network returns 25 observations per page
@@ -95,14 +98,18 @@ def orbit_from_tle(line1, line2):
 def good_observations(norad, since):
     """Number of good observations since `since` (capped at one page, 25), or None
     if SatNOGS Network keeps refusing the request."""
+    # The API silently ignores "satellite__norad_cat_id" (see download_funcube.py), so
+    # filter on "norad_cat_id" and re-check every record's satellite, status and time.
     try:
         page = json.loads(get(f"{NETWORK_API}/observations/", {
-            "format": "json", "satellite__norad_cat_id": norad, "status": "good",
+            "format": "json", "norad_cat_id": norad, "status": "good",
             "start": since.strftime("%Y-%m-%dT%H:%M:%SZ")}))
     except OSError as err:
         print(f"  gave up on NORAD {norad}: {err}", flush=True)
         return None
-    return len(page)
+    return sum(1 for obs in page
+               if obs.get("norad_cat_id") == norad and obs.get("status") == "good"
+               and obs.get("start", "") >= since.strftime("%Y-%m-%dT%H:%M:%S"))
 
 
 def main():
@@ -128,6 +135,8 @@ def main():
         inc, perigee, apogee, epoch = orbit_from_tle(l1, l2)
         if not (lo <= perigee and apogee <= hi):
             continue
+        if not any(b0 <= t["downlink_low"] <= b1 for b0, b1 in BANDS_HZ):
+            continue
         rows.append({
             "norad": norad, "name": t["sat_name"], "tle_name": name,
             "transmitter": t["description"], "uuid": t["uuid"],
@@ -138,7 +147,7 @@ def main():
             "tle_line1": l1, "tle_line2": l2,
             "good_obs_recent": None, "obs_window_days": args.days,
         })
-    print(f"{len(rows)} of them in {lo}-{hi} km orbits; SatNOGS reception status: "
+    print(f"{len(rows)} of them in {lo}-{hi} km orbits on 2 m / 70 cm; SatNOGS reception status: "
           f"{dict(Counter(r['reception_status'] for r in rows))}")
 
     # SatNOGS Network allows only a few requests a minute, so look up the most
