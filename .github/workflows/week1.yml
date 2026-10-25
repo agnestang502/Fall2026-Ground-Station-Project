@@ -1,0 +1,42 @@
+name: Week 1 - pick and find the satellite
+
+# Runs pick_satellite.py and find_satellite.py on GitHub's runners, which can
+# reach SatNOGS and CelesTrak. Results are in the job log and the uploaded artifact.
+on:
+  push:
+    branches: [claude/exciting-euler-488lu3]
+    paths: [pick_satellite.py, find_satellite.py, .github/workflows/week1.yml]
+  workflow_dispatch:
+    inputs:
+      norad:
+        description: "NORAD ID to locate (blank = top-ranked CW candidate)"
+        required: false
+
+jobs:
+  week1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install skyfield numpy matplotlib plotly
+      - name: Rank CW satellites
+        run: python pick_satellite.py --top 25
+      - name: Find the chosen satellite
+        env:
+          NORAD: ${{ inputs.norad }}
+        run: |
+          read NORAD_PICK FREQ <<< "$(python - <<'EOF'
+          import json, os
+          rows = json.load(open("data/cw_candidates.json"))
+          want = os.environ.get("NORAD")
+          r = next(r for r in rows if not want or r["norad"] == int(want))
+          print(r["norad"], r["downlink_hz"])
+          EOF
+          )"
+          python find_satellite.py --norad "$NORAD_PICK" --freq-hz "$FREQ" --ground-track
+      - uses: actions/upload-artifact@v4
+        with:
+          name: week1-results
+          path: data/
