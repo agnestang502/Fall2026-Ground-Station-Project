@@ -15,6 +15,26 @@ by comparing the observed signal frequency with what each station expected from 
 See [docs/signal_validation.md](docs/signal_validation.md) for a plain-English
 explanation and the results on our first 10 passes.
 
+## Simulating a satellite pass
+
+A five-week plan to simulate a pass over a ground station (orbit, Doppler curve,
+waterfall), ending with a training-data generator.
+
+- **Week 1, `find_satellite.py`**: fetches the satellite's TLE from CelesTrak (saved to
+  `data/tle/`, reused if offline), prints the TLE's epoch and age, prints where the
+  satellite is right now (latitude, longitude, altitude) and checks the Week 1
+  checkpoint. `--ground-track` plots one orbit (stretch goal).
+  The default satellite is FUNcube-1, a stand-in until a satellite with an active
+  **CW** beacon is picked on [SatNOGS DB](https://db.satnogs.org); pass
+  `--norad` and `--freq-hz` to use another one.
+
+```bash
+python find_satellite.py --ground-track
+python find_satellite.py --norad <NORAD> --freq-hz <beacon Hz>
+```
+
+## Running
+
 ```bash
 pip install -r requirements.txt
 python download_funcube.py            # download + validate

@@ -7,3 +7,6 @@ pytest
 torch
 torchvision
 pillow
+# Satellite-pass simulation (find_satellite.py and later weeks)
+skyfield
+plotly
