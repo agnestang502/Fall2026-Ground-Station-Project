@@ -4,7 +4,6 @@ name: Week 1 - pick and find the satellite
 # reach SatNOGS and CelesTrak. Results are in the job log and the uploaded artifact.
 on:
   push:
-    branches: [claude/exciting-euler-488lu3]
     paths: [pick_satellite.py, find_satellite.py, .github/workflows/week1.yml]
   workflow_dispatch:
     inputs:
