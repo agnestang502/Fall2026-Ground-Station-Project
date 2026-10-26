@@ -23,7 +23,6 @@ def test_reads_tle_file_and_epoch(tmp_path):
     sat = iss(tmp_path)
     assert sat.name == "ISS (ZARYA)"
     assert sat.epoch.utc_strftime("%Y-%m-%d") == "2014-01-20"
-    assert abs(fs.tle_age_days(sat, sat.epoch + 3.5) - 3.5) < 1e-9
     assert sat.line1 == ISS_TLE.splitlines()[1]
     assert sat.line2 == ISS_TLE.splitlines()[2]
     assert abs(fs.inclination_deg(sat) - 51.6498) < 1e-6

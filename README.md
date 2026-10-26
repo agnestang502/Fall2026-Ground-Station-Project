@@ -20,24 +20,15 @@ explanation and the results on our first 10 passes.
 A five-week plan to simulate a pass over a ground station (orbit, Doppler curve,
 waterfall), ending with a training-data generator.
 
-- **Week 1** ([results](docs/week1_find_satellite.md)): the satellite is
-  **UmKA-1** (NORAD 57172), with a CW beacon at **437.625 MHz**.
-  - `pick_satellite.py` ranks satellites with an active CW beacon on SatNOGS DB by how
-    often SatNOGS Network has heard them recently.
-  - `find_satellite.py` fetches the TLE from CelesTrak (saved to `data/tle/`, reused if
-    offline), prints its epoch and age and where the satellite is right now, and checks
-    the Week 1 checkpoint. `--ground-track` plots one orbit.
-
-```bash
-python pick_satellite.py                 # rank CW satellites (a few minutes)
-python find_satellite.py --ground-track  # UmKA-1 by default
-python find_satellite.py --norad <NORAD> --freq-hz <beacon Hz>
-```
+- **Week 1**, `find_satellite.py` ([results](docs/week1_find_satellite.md)): fetches
+  UmKA-1's TLE (NORAD 57172, CW beacon at 437.625 MHz) from CelesTrak and prints where
+  it is right now. `--ground-track` plots one orbit.
 
 ## Running
 
 ```bash
 pip install -r requirements.txt
 python download_funcube.py            # download + validate
+python find_satellite.py --ground-track   # Week 1: where is UmKA-1 now?
 python -m pytest tests/               # run the tests
 ```
