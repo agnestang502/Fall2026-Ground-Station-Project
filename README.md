@@ -34,6 +34,18 @@ python find_satellite.py --ground-track  # UmKA-1 by default
 python find_satellite.py --norad <NORAD> --freq-hz <beacon Hz>
 ```
 
+- **Week 2** ([results](docs/week2_predict_passes.md)): `predict_passes.py` puts down a
+  real SatNOGS ground station and finds every UmKA-1 pass over it in the next 7 days
+  (above 10°). It prints and saves a table of rise, culmination and set times with each
+  pass's peak elevation (`data/passes/`), and plots the highest pass's elevation and sky
+  track (`data/plots/`). `--compare-satnogs` checks the passes against SatNOGS's own.
+
+```bash
+python predict_passes.py                       # default station
+python predict_passes.py --find-station        # station that heard UmKA-1 most recently
+python predict_passes.py --station-id <ID> --compare-satnogs
+```
+
 ## Running
 
 ```bash

@@ -1,0 +1,42 @@
+name: Week 2 - predict passes over a ground station
+
+# Runs predict_passes.py on GitHub's runners, which can reach SatNOGS and CelesTrak.
+# Results are in the job log and the uploaded artifact.
+on:
+  push:
+    paths: [predict_passes.py, find_satellite.py, .github/workflows/week2.yml]
+  workflow_dispatch:
+    inputs:
+      station_id:
+        description: "SatNOGS station ID (blank = the default in predict_passes.py, or the busiest station if none is set)"
+        required: false
+
+jobs:
+  week2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install skyfield numpy matplotlib
+      - name: Predict passes and compare with SatNOGS
+        env:
+          STATION_ID: ${{ inputs.station_id }}
+        run: |
+          if [ -n "$STATION_ID" ]; then
+            python predict_passes.py --station-id "$STATION_ID" --compare-satnogs
+          elif grep -q '^STATION_ID = None' predict_passes.py; then
+            python predict_passes.py --find-station --compare-satnogs
+          else
+            python predict_passes.py --compare-satnogs
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: week2-results
+          path: |
+            data/tle/
+            data/stations/
+            data/passes/
+            data/plots/
