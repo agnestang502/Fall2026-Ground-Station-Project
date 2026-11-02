@@ -38,7 +38,9 @@ import find_satellite as fs
 from download_funcube import get_page
 
 # --- The ground station (override on the command line) ------------------------
-STATION_ID = None                # SatNOGS station; set once --find-station has run
+# Chosen with --find-station on 2026-11-02: the online station with the most good
+# UmKA-1 observations in the previous 7 days (16), a 3-element UHF Yagi in Japan.
+STATION_ID = 5049                # JF6FYI, Kitakyushu: +33.895, +130.840, 10 m
 
 NETWORK_API = "https://network.satnogs.org/api"
 STATION_DIR = Path(__file__).parent / "data" / "stations"   # git-ignored cache
@@ -327,6 +329,8 @@ def main():
     if args.start:
         now = fs.ts.from_datetime(datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc))
     print(f"Satellite      : {sat.name} (NORAD {sat.model.satnum})")
+    print(f"TLE line 1     : {sat.line1}")
+    print(f"TLE line 2     : {sat.line2}")
     print(f"TLE epoch      : {utc(sat.epoch)} UTC ({fs.tle_age_days(sat, now):.2f} days old)")
     print(f"Station        : {record['name']} (SatNOGS station {record['id']})")
     print(f"Location       : {record['lat']:+.4f} deg, {record['lng']:+.4f} deg, "
