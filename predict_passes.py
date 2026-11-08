@@ -162,7 +162,7 @@ def elevation_deg(sat, station, t):
 def sample_pass(sat, station, p, step_s=STEP_S):
     """Seconds since rise, elevation, azimuth (deg) and range (km), every step_s."""
     seconds = np.arange(0, (p["set"] - p["rise"]) * 86400 + step_s / 2, step_s)
-    t = fs.ts.tt_jd(p["rise"].tt + seconds / 86400)
+    t = fs.ts.tt_jd(p["rise"].whole, p["rise"].tt_fraction + seconds / 86400)
     alt, az, dist = (sat - station).at(t).altaz()
     return seconds, alt.degrees, az.degrees, dist.km
 
@@ -297,8 +297,8 @@ def compare_with_satnogs(sat, station, record, norad):
     return rows
 
 
-def main():
-    p = argparse.ArgumentParser(description="Week 2: predict passes over a ground station.")
+def add_pass_args(p):
+    """Command-line options shared with later weeks: the satellite, station and window."""
     p.add_argument("--norad", type=int, default=fs.NORAD_ID, help="NORAD catalog number")
     p.add_argument("--tle-file", help="read the TLE from this file instead of CelesTrak")
     p.add_argument("--station-id", type=int, default=STATION_ID, help="SatNOGS station ID")
@@ -309,10 +309,11 @@ def main():
     p.add_argument("--alt-m", type=float, default=0, help="station altitude (m)")
     p.add_argument("--start", help="start of the window, UTC, e.g. 2026-11-02T00:00 (default: now)")
     p.add_argument("--days", type=float, default=DAYS_AHEAD, help="how many days ahead")
-    p.add_argument("--compare-satnogs", action="store_true",
-                   help="stretch: compare with this station's SatNOGS pass windows")
-    args = p.parse_args()
 
+
+def load_inputs(args):
+    """Fetch the TLE and station named by add_pass_args' options, print them, and
+    return (sat, station record, station position, start of the window)."""
     sat = fs.fetch_tle(args.norad, args.tle_file)
     if args.lat is not None and args.lon is not None:
         record = {"id": None, "name": "custom location", "lat": args.lat, "lng": args.lon,
@@ -336,6 +337,16 @@ def main():
     print(f"Location       : {record['lat']:+.4f} deg, {record['lng']:+.4f} deg, "
           f"{record['altitude']:.0f} m")
     print(f"Window         : {utc(now)} UTC + {args.days:g} days, above {MIN_ELEVATION_DEG}°")
+    return sat, record, station, now
+
+
+def main():
+    p = argparse.ArgumentParser(description="Week 2: predict passes over a ground station.")
+    add_pass_args(p)
+    p.add_argument("--compare-satnogs", action="store_true",
+                   help="stretch: compare with this station's SatNOGS pass windows")
+    args = p.parse_args()
+    sat, record, station, now = load_inputs(args)
 
     passes = find_passes(sat, station, now, now + args.days)
     if not passes:

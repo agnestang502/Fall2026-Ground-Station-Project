@@ -1,0 +1,38 @@
+name: Week 3 - 3D view, range-rate and Doppler shift
+
+# Runs doppler_pass.py on GitHub's runners, which can reach SatNOGS and CelesTrak.
+# Results are in the job log and the uploaded artifact (open the .html for the 3D view).
+on:
+  push:
+    paths: [doppler_pass.py, predict_passes.py, find_satellite.py, .github/workflows/week3.yml]
+  workflow_dispatch:
+    inputs:
+      station_id:
+        description: "SatNOGS station ID (blank = the default in predict_passes.py)"
+        required: false
+
+jobs:
+  week3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install skyfield numpy matplotlib plotly
+      - name: Doppler shift of the highest pass, and a high vs low pass
+        env:
+          STATION_ID: ${{ inputs.station_id }}
+        run: |
+          if [ -n "$STATION_ID" ]; then
+            python doppler_pass.py --station-id "$STATION_ID" --stretch
+          else
+            python doppler_pass.py --stretch
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: week3-results
+          path: |
+            data/tle/
+            data/plots/
