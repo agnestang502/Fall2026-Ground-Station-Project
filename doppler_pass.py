@@ -49,7 +49,7 @@ def times_after(t0, seconds):
     """skyfield Times `seconds` after t0.
 
     The date is passed as a whole day plus a fraction: one float holding a Julian
-    date like 2461352.5 is only good to about 50 microseconds, which is 35 cm of
+    date like 2461352.5 is only good to about 40 microseconds, which is 30 cm of
     satellite motion and shows up as a sawtooth in the finite-difference range-rate."""
     return fs.ts.tt_jd(t0.whole, t0.tt_fraction + np.asarray(seconds) / 86400)
 

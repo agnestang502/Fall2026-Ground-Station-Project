@@ -46,6 +46,16 @@ python predict_passes.py --find-station        # station that heard UmKA-1 most 
 python predict_passes.py --station-id <ID> --compare-satnogs
 ```
 
+- **Week 3** ([results](docs/week3_doppler.md)): `doppler_pass.py` takes the highest pass
+  and works with the satellite's and station's 3D positions and velocities. It draws an
+  interactive 3D view (plotly), computes the range-rate three ways (dot product, finite
+  difference, skyfield), and plots the Doppler shift, which swings from about +10.25 kHz
+  to −10.25 kHz on UmKA-1's beacon. `--stretch` compares a high and a low pass.
+
+```bash
+python doppler_pass.py --stretch
+```
+
 ## Running
 
 ```bash
