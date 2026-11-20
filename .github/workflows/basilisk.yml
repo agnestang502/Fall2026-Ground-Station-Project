@@ -1,0 +1,39 @@
+name: Basilisk - propagate the TLE and save the pass for Vizard
+
+# Runs basilisk_pass.py on GitHub's runners, which can reach CelesTrak and SatNOGS, with a
+# fresh TLE. Results are in the job log and the uploaded artifact: download it and open
+# vizard/pass_*.bin in Vizard.
+on:
+  push:
+    paths: [basilisk_pass.py, doppler_pass.py, predict_passes.py, find_satellite.py,
+            .github/workflows/basilisk.yml]
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Look for the highest pass this many days ahead"
+        required: false
+        default: "1"
+
+jobs:
+  basilisk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install bsk skyfield numpy matplotlib plotly pytest
+      - name: Tests
+        run: python -m pytest tests/test_basilisk_pass.py -q
+      - name: Propagate with Basilisk, compare with SGP4, save for Vizard
+        env:
+          DAYS: ${{ inputs.days || '1' }}
+        run: python basilisk_pass.py --days "$DAYS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: basilisk-results
+          path: |
+            data/tle/
+            data/plots/basilisk_*
+            data/vizard/
