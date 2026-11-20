@@ -10,3 +10,5 @@ pillow
 # Satellite-pass simulation (find_satellite.py and later weeks)
 skyfield
 plotly
+# Basilisk propagation and Vizard output (basilisk_pass.py)
+bsk

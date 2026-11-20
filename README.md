@@ -56,6 +56,20 @@ python predict_passes.py --station-id <ID> --compare-satnogs
 python doppler_pass.py --stretch
 ```
 
+- **Basilisk and Vizard** ([results](docs/basilisk_vizard.md)): `basilisk_pass.py` hands
+  the TLE to [Basilisk](https://avslab.github.io/basilisk/), CU Boulder's spacecraft
+  simulator. Basilisk propagates the orbit with a 10 x 10 gravity field and puts the
+  station on the rotating Earth. The script compares the pass and Doppler curve with SGP4:
+  they agree to 0.3 s and about 14 Hz a day after the TLE epoch, and drift 111 km apart
+  over 5 days because the run leaves out drag. It saves the pass for Vizard, Basilisk's 3D
+  viewer, or streams it live in real time (`--live`) for a demo.
+
+```bash
+pip install bsk
+python basilisk_pass.py                  # highest pass in the next day, saved for Vizard
+python basilisk_pass.py --live           # real time from now, streamed to Vizard
+```
+
 ## Running
 
 ```bash
